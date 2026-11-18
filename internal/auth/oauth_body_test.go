@@ -107,7 +107,7 @@ func TestPostTokenOversizeIsRejected(t *testing.T) {
 func TestRequestDeviceCodeTruncatedBodyRejected(t *testing.T) {
 	srv := oauthServer(t, bodyHandler(200, `{"device_code":"d"`))
 	m := newTestManager(t, srv.URL)
-	if _, err := m.requestDeviceCode(context.Background()); err == nil {
+	if _, _, err := m.requestDeviceCode(context.Background()); err == nil {
 		t.Fatal("expected an error for a truncated device-code body")
 	}
 }
@@ -115,7 +115,7 @@ func TestRequestDeviceCodeTruncatedBodyRejected(t *testing.T) {
 func TestRequestDeviceCodeOversizeRejected(t *testing.T) {
 	srv := oauthServer(t, bodyHandler(200, `{"device_code":"`+strings.Repeat("d", 500)+`"}`))
 	m := small(t, newTestManager(t, srv.URL), 64)
-	_, err := m.requestDeviceCode(context.Background())
+	_, _, err := m.requestDeviceCode(context.Background())
 	if !isOversize(mustFail(t, err, "device code over the bound")) {
 		t.Errorf("error %v does not wrap xhttp.ErrOversize", err)
 	}

@@ -8,9 +8,11 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"os"
 	"os/exec"
 	"runtime"
+	"strings"
 	"sync"
 	"time"
 
@@ -197,12 +199,12 @@ func (m *Manager) Refresh(ctx context.Context) error {
 	if m.tok == nil || m.tok.RefreshToken == "" {
 		return fmt.Errorf("no refresh token available")
 	}
-	body := map[string]string{
+	body := oauthClientBody(m.cfg, map[string]string{
 		"refresh_token": m.tok.RefreshToken,
-		"client_id":     m.cfg.ClientID,
-		"client_secret": m.cfg.ClientSecret,
-		"redirect_uri":  "urn:ietf:wg:oauth:2.0:oob",
 		"grant_type":    "refresh_token",
+	})
+	if m.cfg.ClientSecret != "" {
+		body["redirect_uri"] = "urn:ietf:wg:oauth:2.0:oob"
 	}
 	tok, err := m.postToken(ctx, "/oauth/token", body)
 	if err != nil {
@@ -249,15 +251,17 @@ type DeviceCode struct {
 // stderr (optionally opening a browser), poll until authorized, persist the
 // token, and return its storage location. progress is written to errW.
 func (m *Manager) LoginDevice(ctx context.Context, errW io.Writer, openBrowser bool) (*Token, string, error) {
-	dc, err := m.requestDeviceCode(ctx)
+	dc, verifier, err := m.requestDeviceCode(ctx)
 	if err != nil {
 		return nil, "", err
 	}
 	fmt.Fprintf(errW, "To authorize traktctl, visit:\n  %s\nand enter code: %s\n", dc.VerificationURL, dc.UserCode)
 	if openBrowser {
-		_ = openURL(dc.VerificationURL)
+		if err := openURL(dc.VerificationURL); err != nil {
+			warn(errW, "did not open browser: "+err.Error())
+		}
 	}
-	tok, err := m.pollDeviceToken(ctx, dc, errW)
+	tok, err := m.pollDeviceToken(ctx, dc, verifier, errW)
 	if err != nil {
 		return nil, "", err
 	}
@@ -273,46 +277,61 @@ func (m *Manager) LoginDevice(ctx context.Context, errW io.Writer, openBrowser b
 	return tok, loc, nil
 }
 
-func (m *Manager) requestDeviceCode(ctx context.Context) (*DeviceCode, error) {
-	b, _ := json.Marshal(map[string]string{"client_id": m.cfg.ClientID})
+func (m *Manager) requestDeviceCode(ctx context.Context) (*DeviceCode, string, error) {
+	reqBody := map[string]string{"client_id": m.cfg.ClientID}
+	var verifier string
+	// Public clients (no client_secret) use PKCE per https://developer.trakt.tv/docs/pkce:
+	// S256 challenge on POST /oauth/device/code, verifier on POST /oauth/device/token.
+	if m.cfg.ClientSecret == "" {
+		var challenge string
+		var err error
+		verifier, challenge, err = newPKCEPair()
+		if err != nil {
+			return nil, "", err
+		}
+		reqBody["code_challenge"] = challenge
+		reqBody["code_challenge_method"] = "S256"
+	}
+	b, _ := json.Marshal(reqBody)
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, m.cfg.BaseURL+"/oauth/device/code", bytes.NewReader(b))
 	if err != nil {
-		return nil, err
+		return nil, "", err
 	}
 	req.Header.Set("Content-Type", "application/json")
 	resp, err := m.http.Do(req)
 	if err != nil {
-		return nil, err
+		return nil, "", err
 	}
 	// The body is read under the bound before the status is inspected, so a
 	// failed read is never mistaken for a bad status.
 	data, err := m.readOAuthBody(resp)
 	if err != nil {
-		return nil, err
+		return nil, "", err
 	}
 	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("device code request failed: HTTP %d", resp.StatusCode)
+		return nil, "", fmt.Errorf("device code request failed: HTTP %d", resp.StatusCode)
 	}
 	var dc DeviceCode
 	if err := xhttp.DecodeOne(data, &dc); err != nil {
-		return nil, err
+		return nil, "", err
 	}
 	if dc.Interval <= 0 {
 		dc.Interval = 5
 	}
-	return &dc, nil
+	return &dc, verifier, nil
 }
 
 // pollDeviceToken polls /oauth/device/token until the user authorizes or the
 // code expires. Status mapping per Trakt: 200 ok, 400 pending, 404 not-found,
 // 409 already-used, 410 expired, 418 denied, 429 slow-down.
-func (m *Manager) pollDeviceToken(ctx context.Context, dc *DeviceCode, errW io.Writer) (*Token, error) {
+func (m *Manager) pollDeviceToken(ctx context.Context, dc *DeviceCode, verifier string, _ io.Writer) (*Token, error) {
 	interval := time.Duration(dc.Interval) * time.Second
 	deadline := time.Now().Add(time.Duration(dc.ExpiresIn) * time.Second)
-	body := map[string]string{
-		"code":          dc.DeviceCode,
-		"client_id":     m.cfg.ClientID,
-		"client_secret": m.cfg.ClientSecret,
+	body := oauthClientBody(m.cfg, map[string]string{
+		"code": dc.DeviceCode,
+	})
+	if m.cfg.ClientSecret == "" {
+		body["code_verifier"] = verifier
 	}
 	for {
 		if time.Now().After(deadline) {
@@ -419,12 +438,9 @@ func (m *Manager) Revoke(ctx context.Context) error {
 		m.tok = nil
 		return m.store.clear()
 	}
-	body := map[string]string{
-		"token":         m.tok.AccessToken,
-		"client_id":     m.cfg.ClientID,
-		"client_secret": m.cfg.ClientSecret,
-	}
-	b, _ := json.Marshal(body)
+	b, _ := json.Marshal(oauthClientBody(m.cfg, map[string]string{
+		"token": m.tok.AccessToken,
+	}))
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, m.cfg.BaseURL+"/oauth/revoke", bytes.NewReader(b))
 	if err != nil {
 		return err
@@ -454,12 +470,30 @@ func (m *Manager) Logout() error {
 	return m.store.clear()
 }
 
-func openURL(url string) error {
+// allowedBrowserURL is the trust boundary before handing a URL to open/xdg-open.
+// Only HTTPS links on trakt.tv (or a subdomain) are opened; anything else is
+// printed to stderr for the user but never passed to a desktop handler.
+func allowedBrowserURL(raw string) bool {
+	u, err := url.Parse(raw)
+	if err != nil || u.Scheme != "https" {
+		return false
+	}
+	if u.User != nil {
+		return false
+	}
+	host := strings.ToLower(u.Hostname())
+	return host == "trakt.tv" || strings.HasSuffix(host, ".trakt.tv")
+}
+
+func openURL(link string) error {
+	if !allowedBrowserURL(link) {
+		return fmt.Errorf("verification URL %q is not an allowed https://*.trakt.tv link", link)
+	}
 	switch runtime.GOOS {
 	case "darwin":
-		return exec.Command("open", url).Start()
+		return exec.Command("open", link).Start()
 	case "linux":
-		return exec.Command("xdg-open", url).Start()
+		return exec.Command("xdg-open", link).Start()
 	default:
 		return nil
 	}

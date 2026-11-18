@@ -29,7 +29,7 @@ func TestOAuthClientRefusesCrossOriginRedirect(t *testing.T) {
 	defer srv.Close()
 
 	m := NewManager(&config.Config{ClientID: "cid", BaseURL: srv.URL})
-	_, err := m.requestDeviceCode(context.Background())
+	_, _, err := m.requestDeviceCode(context.Background())
 	if err == nil {
 		t.Fatal("expected an error for a cross-origin redirect, got nil")
 	}
@@ -51,7 +51,7 @@ func TestOAuthClientBoundsRedirectHops(t *testing.T) {
 	defer srv.Close()
 
 	m := NewManager(&config.Config{ClientID: "cid", BaseURL: srv.URL})
-	_, err := m.requestDeviceCode(context.Background())
+	_, _, err := m.requestDeviceCode(context.Background())
 	if err == nil {
 		t.Fatal("expected an error for a redirect chain over the hop cap, got nil")
 	}

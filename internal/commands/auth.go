@@ -51,14 +51,10 @@ func newAuthCmd(app *App) *cobra.Command {
 	var noBrowser bool
 	login := &cobra.Command{
 		Use:   "login",
-		Short: "Authorize via OAuth device flow",
+		Short: "Authorize via OAuth device flow (PKCE S256 when no client secret)",
 		RunE: func(cmd *cobra.Command, args []string) error {
 			if cerr := app.requireClientID(); cerr != nil {
 				return cerr
-			}
-			if app.Cfg.ClientSecret == "" {
-				return output.NewError(output.CodeBadConfig,
-					"device flow needs client_secret; set TRAKT_CLIENT_SECRET or config.toml", output.ExitUser)
 			}
 			tok, loc, err := app.Auth.LoginDevice(app.ctx(), app.Out.Err, !noBrowser)
 			if err != nil {
