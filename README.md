@@ -28,21 +28,28 @@ The binary lands in `$(go env GOPATH)/bin` — make sure that's on your `PATH`. 
 
 ## Quick start
 
-From zero to authenticated. You need a Trakt application's `client_id`/`client_secret` from [trakt.tv/oauth/applications](https://trakt.tv/oauth/applications).
+From zero to authenticated. Create an app on [developer.trakt.tv](https://developer.trakt.tv) (new **Development** apps are PKCE-only and issue a `client_id` with no `client_secret` — see [PKCE](https://developer.trakt.tv/docs/pkce)).
+
+**Public client (PKCE, client id only):**
 
 ```
-# 1. Keep the client secret in the environment, not on disk or in shell history:
-export TRAKT_CLIENT_SECRET=SECRET
-traktctl config init --client-id ID
-
-# 2. Log in, then make your first authenticated call:
+export TRAKT_CLIENT_ID=YOUR_CLIENT_ID
+traktctl config init --client-id "$TRAKT_CLIENT_ID"
 traktctl auth login
-#    Prints a device code + URL to stderr — open the URL, enter the code, approve.
+# Prints a device code + URL to stderr — open the URL, enter the code, approve.
 traktctl auth status
 traktctl user watchlist
 ```
 
-Prefer everything in one command? `traktctl config init --client-id ID --client-secret SECRET --login` writes the secret to `config.toml` and logs in immediately.
+**Confidential client (legacy, with secret):** set `TRAKT_CLIENT_SECRET` or put `client_secret` in `config.toml` — device login and refresh use the secret instead of PKCE, unchanged from before.
+
+```
+export TRAKT_CLIENT_SECRET=SECRET
+traktctl config init --client-id ID
+traktctl auth login
+```
+
+Prefer one command? `traktctl config init --client-id ID --login` is enough for PKCE apps; add `--client-secret SECRET` only when your app has one.
 
 Already have a `config.toml`? Just `traktctl auth login`. Tokens land in the macOS Keychain; the client refreshes them automatically on a 401. See [Authentication](#authentication) and [Bootstrap from scratch](#bootstrap-from-scratch) for the full lifecycle.
 
@@ -65,14 +72,14 @@ Resolution order (highest first): CLI flags > environment > `config.toml` > keyc
 
 - `config.toml` is searched in `--config`, then `$TRAKTCTL_CONFIG`, then `~/.config/traktctl/config.toml`. There is no cwd fallback — for a repo-local dev config, set `TRAKTCTL_CONFIG=./config.toml`.
 - Tokens live in the macOS Keychain (service `traktctl`). File fallback: `~/.config/traktctl/tokens.json` only (no cwd fallback).
-- Env: `TRAKT_CLIENT_ID`, `TRAKT_CLIENT_SECRET`, `TRAKT_ACCESS_TOKEN`, `TRAKT_REFRESH_TOKEN`, `TRAKT_BASE_URL`.
+- Env: `TRAKT_CLIENT_ID` (required for API calls), optional `TRAKT_CLIENT_SECRET` (omit for PKCE apps), `TRAKT_ACCESS_TOKEN`, `TRAKT_REFRESH_TOKEN`, `TRAKT_BASE_URL`.
 - Request timeout: `--timeout`, `$TRAKTCTL_TIMEOUT` and `timeout` in `config.toml` all take a whole number of seconds, 1 to 86400 (default 30). Anything else is rejected naming its source: `--timeout` is `BAD_REQUEST`, the env var and the config key are `BAD_CONFIG`. A config file holding the old `timeout = "30s"` form must be edited to `timeout = 30` — every command exits `BAD_CONFIG` until it is; `config init --force` cannot migrate it and drops the key with a warning instead.
 
 Example `config.toml`:
 
 ```toml
 client_id     = "..."
-client_secret = "..."
+# client_secret = "..."               # optional; omit for PKCE / public clients
 default_user  = "your-trakt-username"   # optional; user-scoped reads fall back to "me"
 base_url      = "https://api.trakt.tv"
 timeout       = 30                      # optional; whole seconds, 1-86400
@@ -83,18 +90,18 @@ timeout       = 30                      # optional; whole seconds, 1-86400
 A fresh machine needs credentials then tokens:
 
 ```
-traktctl config init --client-id ID --client-secret SECRET
+traktctl config init --client-id ID
 traktctl auth login
 # or one shot:
-traktctl config init --client-id ID --client-secret SECRET --login
+traktctl config init --client-id ID --login
 ```
 
-`config init` writes `~/.config/traktctl/config.toml` (`0600`); `--config PATH` targets elsewhere, `--force` overwrites. Omit `--client-secret` to keep it in `TRAKT_CLIENT_SECRET` instead of the file. `traktctl config path` shows where config and tokens are read from.
+`config init` writes `~/.config/traktctl/config.toml` (`0600`); `--config PATH` targets elsewhere, `--force` overwrites. PKCE apps need only `client_id`. If you have a confidential-app secret, pass `--client-secret` or set `TRAKT_CLIENT_SECRET` instead of writing it to disk. `traktctl config path` shows where config and tokens are read from.
 
 ## Authentication
 
 ```
-traktctl auth login        # OAuth device flow; prints a code + URL to stderr
+traktctl auth login        # OAuth device flow; PKCE S256 when no client_secret (per Trakt PKCE guide)
 traktctl auth status       # token state, expiry, storage location
 traktctl auth refresh      # force a refresh
 traktctl auth logout        # clear local storage
@@ -195,7 +202,7 @@ go test -tags=live,refresh ./test/...  # adds the token-rotating refresh test
 
 ## Secrets
 
-`config.toml` holds the client secret; OAuth tokens live in the macOS Keychain (an on-disk `~/.config/traktctl/tokens.json` is only a fallback for when the keychain is unavailable, e.g. CI/Linux, and is not present by default). Both files are kept out of git via `.gitignore` — never commit them. For distribution, tokens belong in the keychain and the client secret in the environment.
+`config.toml` may hold a client secret (optional; PKCE apps omit it). OAuth tokens live in the macOS Keychain (an on-disk `~/.config/traktctl/tokens.json` is only a fallback for when the keychain is unavailable, e.g. CI/Linux, and is not present by default). Both files are kept out of git via `.gitignore` — never commit them. For distribution, tokens belong in the keychain and the client secret in the environment.
 
 ## Skill
 

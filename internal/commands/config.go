@@ -91,14 +91,10 @@ func (a *App) configInit() *cobra.Command {
 			if fc.ClientSecret != "" {
 				out["client_secret"] = "***redacted***"
 			} else {
-				out["client_secret"] = "(not written; supply via TRAKT_CLIENT_SECRET)"
+				out["client_secret"] = "(not used; PKCE public client — client_id only)"
 			}
 
 			if login {
-				if fc.ClientSecret == "" {
-					return output.UsageError(
-						"--login needs --client-secret for the device flow")
-				}
 				// The mode the new file will apply, env first, so --login
 				// never probes a keychain the user has opted out of.
 				mode, merr := config.ResolveTokenStore(fc.TokenStore)
