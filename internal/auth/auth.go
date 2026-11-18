@@ -8,9 +8,11 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"os"
 	"os/exec"
 	"runtime"
+	"strings"
 	"sync"
 	"time"
 
@@ -255,7 +257,9 @@ func (m *Manager) LoginDevice(ctx context.Context, errW io.Writer, openBrowser b
 	}
 	fmt.Fprintf(errW, "To authorize traktctl, visit:\n  %s\nand enter code: %s\n", dc.VerificationURL, dc.UserCode)
 	if openBrowser {
-		_ = openURL(dc.VerificationURL)
+		if err := openURL(dc.VerificationURL); err != nil {
+			warn(errW, "did not open browser: "+err.Error())
+		}
 	}
 	tok, err := m.pollDeviceToken(ctx, dc, errW)
 	if err != nil {
@@ -454,12 +458,30 @@ func (m *Manager) Logout() error {
 	return m.store.clear()
 }
 
-func openURL(url string) error {
+// allowedBrowserURL is the trust boundary before handing a URL to open/xdg-open.
+// Only HTTPS links on trakt.tv (or a subdomain) are opened; anything else is
+// printed to stderr for the user but never passed to a desktop handler.
+func allowedBrowserURL(raw string) bool {
+	u, err := url.Parse(raw)
+	if err != nil || u.Scheme != "https" {
+		return false
+	}
+	if u.User != nil {
+		return false
+	}
+	host := strings.ToLower(u.Hostname())
+	return host == "trakt.tv" || strings.HasSuffix(host, ".trakt.tv")
+}
+
+func openURL(link string) error {
+	if !allowedBrowserURL(link) {
+		return fmt.Errorf("verification URL %q is not an allowed https://*.trakt.tv link", link)
+	}
 	switch runtime.GOOS {
 	case "darwin":
-		return exec.Command("open", url).Start()
+		return exec.Command("open", link).Start()
 	case "linux":
-		return exec.Command("xdg-open", url).Start()
+		return exec.Command("xdg-open", link).Start()
 	default:
 		return nil
 	}
